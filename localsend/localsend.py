@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import socket
 import struct
 from asyncio import get_event_loop, DatagramProtocol, DatagramTransport, run_coroutine_threadsafe
@@ -11,14 +12,18 @@ from typing import TypedDict, Awaitable, Callable, AsyncGenerator, Literal
 from uuid import uuid4
 
 from asgi_tools import Request, Response
-from httpx import AsyncClient
+from httpx import AsyncClient, Timeout
 from muffin import Application
 from uvicorn import Config, Server
 
 from localsend import Device, DeviceType, FileInfo, FileInfoMetadata
 from localsend.certs import create_cert
-from localsend.exceptions import LSPrepareUploadException, InvalidPin
+from localsend.exceptions import LSPrepareUploadException, InvalidPin, Rejected, BlockedByAnotherSession, \
+    TooManyRequests
 from localsend.jwt import JWT
+
+
+mimetypes.init()
 
 
 class CallbacksDict(TypedDict):
@@ -144,7 +149,7 @@ class LocalSend:
     def info(self) -> dict:
         if self._fingerprint not in self._devices:
             self._devices[self._fingerprint] = Device(
-                ip=self._multicast_client.socket.getsockname(),
+                ip=self._multicast_client.socket.getsockname() if self._multicast_client is not None else "0.0.0.0",
                 alias=self._device_name,
                 version="2.1",
                 deviceModel=self._device_model,
@@ -200,9 +205,14 @@ class LocalSend:
 
         return UdpContainer(sock, transport, protocol)
 
+    async def create_udp(self) -> None:
+        if self._multicast_server is None:
+            self._multicast_server = await self._create_udp(True)
+        if self._multicast_client is None:
+            self._multicast_client = await self._create_udp(False)
+
     async def run(self) -> None:
-        self._multicast_server = await self._create_udp(True)
-        self._multicast_client = await self._create_udp(False)
+        await self.create_udp()
 
         ls_server = LSHttpServer(self)
         with TemporaryDirectory() as tmp:
@@ -276,6 +286,89 @@ class LocalSend:
             return func_
 
         return decorator
+
+    async def send(
+            self, device: str | Device | tuple[str, int], files: list[PathLike | str] | PathLike | str | None = None,
+            text: str | None = None, pin: str | None = None, protocol: Literal["http", "https"] = "https",
+            ignore_reject: bool = False,
+    ) -> None:
+        """
+        Send file or text to a device.
+        A list of paths to files or texts is required.
+
+        :param device: Device object, fingerprint (if device was discovered before that) or address in format \
+            (host, port).
+        :param files: File or list of files to send or None if sending text.
+        :param text: Text to sent or None if sending file.
+        :param pin: Pin if it is required on a target device.
+        :param protocol: Protocol to use if device parameter is provided as address.
+        :param ignore_reject: Do nothing if upload is rejected.
+        If False and upload rejected, `localsend.exceptions.Rejected` will be raised.
+        :return:
+        """
+
+        if files is None and text is None:  # TODO: add text sending
+            raise ValueError("You need to provide either file(s) or text.")
+
+        if isinstance(device, str):
+            device = self._devices.get(device)
+            if device is None:
+                raise KeyError("Specified device not found")
+        if isinstance(device, Device):
+            addr = f"{device.protocol}://{device.ip}:{device.port}"
+        else:
+            addr = f"{protocol}://{device[0]}:{device[1]}"
+
+        if files is not None and not isinstance(files, list):
+            files = [files]
+
+        files = {str(uuid4()): Path(file) for file in files}
+
+        async with AsyncClient(verify=False, timeout=180) as cl:
+            for pin in (pin, self._global_pin):
+                prep_resp = await cl.post(f"{addr}/api/localsend/v2/prepare-upload", json={
+                    "info": self.info(),
+                    "files": {
+                        file_id: {
+                            "id": file_id,
+                            "fileName": file.name,
+                            "size": file.stat().st_size,
+                            "fileType": mimetypes.guess_type(file.name)[0] or "application/octet-stream",
+                        }
+                        for file_id, file in files.items()
+                    }
+                }, params={"pin": pin} if pin is not None else {})
+                if prep_resp.status_code < 400:
+                    break
+            if prep_resp.status_code == 204:
+                return
+            elif prep_resp == 401:
+                raise InvalidPin()
+            elif prep_resp == 403:
+                if ignore_reject:
+                    return
+                else:
+                    raise Rejected()
+            elif prep_resp == 401:
+                raise BlockedByAnotherSession()
+            elif prep_resp == 429:
+                raise TooManyRequests()
+
+            data = prep_resp.json()
+            session_id = data["sessionId"]
+            tokens = data["files"]
+
+            async def _upload_file(fp) -> bytes:
+                while chunk := fp.read(1024 * 1024):
+                    yield chunk
+
+            for file_id, token in tokens.items():
+                with open(files[file_id], "rb") as f:
+                    await cl.post(f"{addr}/api/localsend/v2/upload", content=_upload_file(f), params={
+                        "sessionId": session_id,
+                        "fileId": file_id,
+                        "token": token,
+                    })
 
     async def _discover_stub(self, device: Device) -> None:
         ...
