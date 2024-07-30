@@ -1,6 +1,8 @@
+from __future__ import annotations
 from asyncio import get_event_loop
 
 from localsend import Device, FileInfo
+from localsend.exceptions import PinRequired
 from localsend.localsend import LocalSend
 
 
@@ -8,7 +10,9 @@ async def _discover_cb(device: Device) -> None:
     print(f"New device: {device.alias}")
 
 
-async def _prepare_upload_cb(device: Device, files: dict[str, FileInfo]) -> None:
+async def _prepare_upload_cb(device: Device, files: dict[str, FileInfo], pin: str | None) -> None:
+    if pin != "1111":
+        raise PinRequired()
     print(f"Requested upload of {len(files)} files from {device.alias}")
 
 
@@ -21,7 +25,7 @@ async def _upload_complete_cb(device: Device, file: FileInfo) -> None:
 
 
 async def main() -> None:
-    ls = LocalSend("idk")
+    ls = LocalSend("idk", global_pin="1234")
     ls.callback("discover", _discover_cb)
     ls.callback("prepare_upload", _prepare_upload_cb)
     ls.callback("upload_start", _upload_start_cb)
