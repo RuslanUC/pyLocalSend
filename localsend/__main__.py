@@ -26,12 +26,15 @@ async def _upload_complete_cb(device: Device, file: FileInfo) -> None:
 
 async def main() -> None:
     ls = LocalSend("idk", global_pin="1234")
-    ls.callback("discover", _discover_cb)
-    ls.callback("prepare_upload", _prepare_upload_cb)
-    ls.callback("upload_start", _upload_start_cb)
-    ls.callback("upload_complete", _upload_complete_cb)
+    #ls.callback("discover", _discover_cb)
+    #ls.callback("prepare_upload", _prepare_upload_cb)
+    #ls.callback("upload_start", _upload_start_cb)
+    #ls.callback("upload_complete", _upload_complete_cb)
 
-    await ls.run()
+    #await ls.send(("192.168.0.101", 53317), ["~/32.bin" for _ in range(8)])
+    await ls.send(("192.168.0.101", 53317), text="asdqwe")
+
+    #await ls.run()
 
 
 if __name__ == '__main__':

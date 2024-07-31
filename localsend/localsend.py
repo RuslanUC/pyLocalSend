@@ -12,7 +12,7 @@ from typing import TypedDict, Awaitable, Callable, AsyncGenerator, Literal
 from uuid import uuid4
 
 from asgi_tools import Request, Response
-from httpx import AsyncClient, Timeout
+from httpx import AsyncClient
 from muffin import Application
 from uvicorn import Config, Server
 
@@ -320,9 +320,20 @@ class LocalSend:
             addr = f"{protocol}://{device[0]}:{device[1]}"
 
         if files is not None and not isinstance(files, list):
-            files = [files]
+            files: list = [files]
+        elif files is None:
+            files = []
 
-        files = {str(uuid4()): Path(file) for file in files}
+        files: dict[str, Path | dict] = {str(uuid4()): Path(file) for file in files}
+        if text is not None:
+            file_id = str(uuid4())
+            files[file_id] = {
+                "id": file_id,
+                "fileName": f"{file_id}.txt",
+                "size": len(text),
+                "preview": text[:1024],
+                "fileType": "text/plain",
+            }
 
         async with AsyncClient(verify=False, timeout=180) as cl:
             for pin in (pin, self._global_pin):
@@ -334,7 +345,7 @@ class LocalSend:
                             "fileName": file.name,
                             "size": file.stat().st_size,
                             "fileType": mimetypes.guess_type(file.name)[0] or "application/octet-stream",
-                        }
+                        } if isinstance(file, Path) else file
                         for file_id, file in files.items()
                     }
                 }, params={"pin": pin} if pin is not None else {})
